@@ -1,52 +1,60 @@
 
-import os, urllib.request, zipfile, io, sys
+import os
+import requests
+import zipfile
+import io
 
-BASE = os.path.dirname(__file__)
-EPHE_DIR = os.path.join(BASE, "ephe")
-os.makedirs(EPHE_DIR, exist_ok=True)
+# === CONFIGURA QUI IL LINK GOOGLE DRIVE ===
+# Sostituisci con l'ID del tuo file ephe.zip caricato su Google Drive
+GOOGLE_DRIVE_FILE_ID = "1luz3NgX1ECrXHh_xw07AHucIyONJ8vGN"
+GOOGLE_DRIVE_URL = f"https://drive.google.com/uc?export=download&id={GOOGLE_DRIVE_FILE_ID}"
 
-def is_empty(path: str) -> bool:
-    try:
-        return len([p for p in os.listdir(path) if not p.startswith('.')]) == 0
-    except FileNotFoundError:
-        return True
+EPHE_DIR = "ephe"
 
-# Permette di forzare un URL personalizzato (es. tuo mirror)
-OVERRIDE = os.getenv("EPHE_URL_OVERRIDE")
+def download_from_google_drive(file_id, destination):
+    """Scarica un file da Google Drive gestendo il token di conferma."""
+    URL = "https://docs.google.com/uc?export=download"
+    session = requests.Session()
 
-CANDIDATE_URLS = []
-if OVERRIDE:
-    CANDIDATE_URLS.append(OVERRIDE)
+    response = session.get(URL, params={'id': file_id}, stream=True)
+    token = get_confirm_token(response)
 
-# 1) GitHub ufficiale (raw) - pacchetto completo ephe.zip
-CANDIDATE_URLS.append("https://github.com/aloistr/swisseph/raw/master/ephe.zip")
+    if token:
+        params = {'id': file_id, 'confirm': token}
+        response = session.get(URL, params=params, stream=True)
 
-# 2) Dropbox ufficiale (cartella 'ephe' compressa come ephe.zip)
-#    Nota: il link pubblico della cartella non punta direttamente allo zip;
-#    se hai uno zip tuo con link diretto, usalo via EPHE_URL_OVERRIDE.
-#    Lascio come fallback il raw GitHub che è quello più stabile.
+    save_response_content(response, destination)
 
-def fetch_and_extract(url: str) -> bool:
-    try:
-        print(f"[ephe] Downloading: {url}", file=sys.stderr, flush=True)
-        with urllib.request.urlopen(url, timeout=120) as resp:
-            data = resp.read()
-        with zipfile.ZipFile(io.BytesIO(data)) as z:
-            z.extractall(EPHE_DIR)
-        print(f"[ephe] Extracted into: {EPHE_DIR}", file=sys.stderr, flush=True)
-        return True
-    except Exception as e:
-        print(f"[ephe] WARN: failed {url} → {e}", file=sys.stderr, flush=True)
-        return False
+def get_confirm_token(response):
+    """Estrae il token di conferma se presente."""
+    for key, value in response.cookies.items():
+        if key.startswith('download_warning'):
+            return value
+    return None
 
-if is_empty(EPHE_DIR):
-    ok = False
-    for u in CANDIDATE_URLS:
-        if fetch_and_extract(u):
-            ok = True
-            break
-    if not ok:
-        print("[ephe] ERROR: ephe directory is still empty. Swiss Ephemeris may fail.", file=sys.stderr, flush=True)
-else:
-    print("[ephe] Ephemeris already present.", file=sys.stderr, flush=True)
+def save_response_content(response, destination):
+    CHUNK_SIZE = 32768
+    with open(destination, "wb") as f:
+        for chunk in response.iter_content(CHUNK_SIZE):
+            if chunk:
+                f.write(chunk)
+
+def ensure_ephe():
+    """Scarica ed estrae ephe.zip se non presente."""
+    if not os.path.exists(EPHE_DIR):
+        print(f"[INFO] Cartella '{EPHE_DIR}' non trovata. Scarico ephe.zip da Google Drive...")
+        zip_path = "ephe.zip"
+        download_from_google_drive(GOOGLE_DRIVE_FILE_ID, zip_path)
+
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(EPHE_DIR)
+
+        os.remove(zip_path)
+        print("[OK] ephe.zip scaricato ed estratto con successo.")
+    else:
+        print(f"[OK] Cartella '{EPHE_DIR}' già presente. Nessun download necessario.")
+
+if __name__ == "__main__":
+    ensure_ephe()
+
 
