@@ -3,8 +3,13 @@ services:
     name: houseofvenus-astrocalc
     env: python
     plan: free
-    buildCommand: "pip install -r requirements.txt && bash install_ephe.sh"
-    startCommand: "gunicorn app:app --reload --bind 0.0.0.0:$PORT"
+    buildCommand: |
+      pip install -r requirements.txt
+      bash ./install_ephe.sh
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.13
+      - key: EPHE_FILE_ID
+        value: 1luz3NgX1ECrXHh_xw07AHucIyONJ8vGN
+
