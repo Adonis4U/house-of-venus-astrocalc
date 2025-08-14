@@ -1,9 +1,11 @@
 #!/bin/bash
 set -e
 
+echo "[INFO] Installazione pacchetti necessari..."
+apt-get update && apt-get install -y curl unzip
+
 echo "[INFO] Scarico ed estraggo ephe.zip da Google Drive..."
 
-# Scarico direttamente il file (ID da sostituire con il tuo)
 FILE_ID="1luz3NgX1ECrXHh_xw07AHucIyONJ8vGN"
 FILE_NAME="ephe.zip"
 
