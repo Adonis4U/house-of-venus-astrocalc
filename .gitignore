@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+ephe/*.zip
+ephe/*.tgz
+.env
+.DS_Store
