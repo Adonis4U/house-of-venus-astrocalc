@@ -5,3 +5,4 @@ timezonefinder==6.2.0
 pytz==2025.2
 pyswisseph==2.10.3.2
 requests==2.31.0
+gdown==5.2.0
