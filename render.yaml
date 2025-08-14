@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: houseofvenus-astrocalc
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python download_ephe.py && gunicorn app:app --reload --bind 0.0.0.0:$PORT"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10
