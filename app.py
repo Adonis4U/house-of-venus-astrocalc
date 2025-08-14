@@ -14,8 +14,9 @@ API_KEY = os.getenv("API_KEY", "a96be9cd-d006-439c-962b-3f8314d2e080")
 
 @app.before_request
 def check_api_key():
-    # health endpoint is public
-    if request.path.startswith("/health"):
+    # Endpoint pubblici e preflight CORS
+    public_paths = ("/", "/health", "/healthz")
+    if request.method == "OPTIONS" or request.path in public_paths:
         return
     key = request.headers.get("X-API-Key")
     if key != API_KEY:
@@ -74,10 +75,25 @@ PLANETS = [
     (swe.PLUTO, "Pluto")
 ]
 
+# ---- Public endpoints ----
+@app.get("/")
+def index():
+    # 200 OK per health-check; HEAD è gestito automaticamente da Flask
+    return jsonify({
+        "status": "ok",
+        "service": "houseofvenus-astrocalc",
+        "time_utc": datetime.utcnow().isoformat() + "Z"
+    }), 200
+
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok"}, 200
 
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}, 200
+
+# ---- Main API ----
 @app.post("/natal")
 def natal():
     # --- robust input parsing: JSON or form, with raw fallback ---
@@ -191,3 +207,4 @@ def natal():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=DEBUG)
+
