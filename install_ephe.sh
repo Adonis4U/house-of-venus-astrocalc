@@ -16,16 +16,15 @@ fi
 log "Scarico ephe.zip con gdown (ID: $EPHE_FILE_ID)…"
 
 # usa python + gdown (già installato in buildCommand via requirements.txt)
-python3 - <<PY
+python3 - <<'PY'
 import os, sys, zipfile
 import gdown
 
 file_id = os.environ["EPHE_FILE_ID"]
-url = f"https://drive.google.com/uc?id={file_id}"
 out = "ephe.zip"
 
-# download con gdown (gestisce token/conferme)
-gdown.download(url, out=out, quiet=False)
+# gdown 5.x: usare 'output=' oppure passare 'id='
+gdown.download(id=file_id, output=out, quiet=False)
 
 # verifica ZIP
 if not zipfile.is_zipfile(out):
@@ -34,7 +33,7 @@ if not zipfile.is_zipfile(out):
         head = f.read(500)
     try:
         snippet = head.decode("utf-8", errors="replace")
-    except:
+    except Exception:
         snippet = str(head)
     print("[DEBUG] Prime 500 bytes:", file=sys.stderr)
     print(snippet, file=sys.stderr)
