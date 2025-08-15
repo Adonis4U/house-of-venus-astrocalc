@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 from flask import Flask, request, jsonify
-from geopy.geocoders import Nominatim
+# from geopy.geocoders import Nominatim
 from timezonefinder import TimezoneFinder
 import pytz
 import swisseph as swe
@@ -266,6 +266,9 @@ def natal():
                                  f"Try 'City, Country'"}), 502
     lat, lon = float(geo["lat"]), float(geo["lon"])
     resolved_place = geo.get("name", place)
+    geocoder_source = geo.get("source", "unknown")
+    app.logger.info(f"[natal] geocoder={geocoder_source} place='{place}' -> '{resolved_place}' ({lat},{lon})")
+
 
     # Time zone
     tf = TimezoneFinder()
@@ -322,8 +325,10 @@ def natal():
         "input": {
             "name": name,
             "place_query": place,
-            "resolved_place": location.address,
-            "lat": lat, "lon": lon,
+            "resolved_place": resolved_place,
+            "geocoder": geocoder_source,
+            "lat": lat,
+            "lon": lon,
             "timezone": tzname,
             "local_datetime": local_dt.isoformat(),
             "utc_datetime": utc_dt.isoformat(),
