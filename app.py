@@ -5,6 +5,148 @@ from geopy.geocoders import Nominatim
 from timezonefinder import TimezoneFinder
 import pytz
 import swisseph as swe
+import time, random, json, requests
+from typing import Optional, Dict, Any, Tuple
+
+# --- CONFIG GEOCODING ---
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+GEOCODER_UA = os.getenv("GEOCODER_UA", "house-of-venus-astrocalc/1.0")
+GEO_TTL_SECONDS = int(os.getenv("GEO_TTL_SECONDS", "86400"))   # 24h
+RETRY_MAX = int(os.getenv("RETRY_MAX", "3"))
+RETRY_BASE_SLEEP = float(os.getenv("RETRY_BASE_SLEEP", "0.6"))
+RETRY_MAX_SLEEP = float(os.getenv("RETRY_MAX_SLEEP", "4.0"))
+
+# --- TTL cache semplice in memoria ---
+class SimpleTTLCache:
+    def __init__(self, maxsize=8000, ttl=86400):
+        self.store: Dict[str, Tuple[float, Any]] = {}
+        self.maxsize, self.ttl = maxsize, ttl
+    def get(self, key: str):
+        rec = self.store.get(key)
+        if not rec: return None
+        ts, val = rec
+        if time.time() - ts > self.ttl:
+            self.store.pop(key, None)
+            return None
+        return val
+    def set(self, key: str, val: Any):
+        if len(self.store) > self.maxsize:
+            # prune semplice: rimuovi scaduti o una manciata dei più vecchi
+            for k in list(self.store.keys())[:1000]:
+                ts, _ = self.store[k]
+                if time.time() - ts > self.ttl:
+                    self.store.pop(k, None)
+        self.store[key] = (time.time(), val)
+
+GEO_CACHE = SimpleTTLCache(ttl=GEO_TTL_SECONDS)
+
+def _norm_place(s: str) -> str:
+    return " ".join((s or "").strip().split()).lower()
+
+def _req_with_retry(url, params=None, headers=None, timeout=12) -> Optional[requests.Response]:
+    params = params or {}; headers = headers or {}
+    last_exc = None
+    for attempt in range(1, RETRY_MAX + 1):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=timeout)
+            if r.status_code == 200 and r.text:
+                return r
+            if r.status_code in (429, 500, 502, 503, 504):
+                raise requests.RequestException(f"HTTP {r.status_code}")
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last_exc = e
+            sleep_s = min(RETRY_MAX_SLEEP, RETRY_BASE_SLEEP * (2 ** (attempt - 1))) + random.uniform(0, 0.25)
+            app.logger.warning(f"[geocode] retry {attempt}/{RETRY_MAX} after {e}; sleep {sleep_s:.2f}s")
+            time.sleep(sleep_s)
+    app.logger.error(f"[geocode] all retries failed: {last_exc}")
+    return None
+
+# --- Provider: Google (se key presente)
+def geocode_google(place: str) -> Optional[Dict[str, Any]]:
+    if not GOOGLE_MAPS_API_KEY:
+        return None
+    url = "https://maps.googleapis.com/maps/api/geocode/json"
+    params = {"address": place, "key": GOOGLE_MAPS_API_KEY}
+    r = _req_with_retry(url, params=params, headers={"User-Agent": GEOCODER_UA})
+    if not r: return None
+    try:
+        data = r.json()
+        if data.get("status") == "OK" and data.get("results"):
+            it = data["results"][0]
+            loc = it["geometry"]["location"]
+            return {"lat": float(loc["lat"]), "lon": float(loc["lng"]),
+                    "name": it.get("formatted_address", place), "source": "google"}
+    except Exception:
+        app.logger.exception("[geocode] google parse error")
+    return None
+
+# --- Provider: Nominatim
+def geocode_nominatim(place: str) -> Optional[Dict[str, Any]]:
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {"q": place, "format": "json", "limit": 1, "addressdetails": 1}
+    r = _req_with_retry(url, params=params, headers={"User-Agent": GEOCODER_UA, "Accept":"application/json"})
+    if not r: return None
+    try:
+        data = r.json()
+        if isinstance(data, list) and data:
+            it = data[0]
+            return {"lat": float(it["lat"]), "lon": float(it["lon"]),
+                    "name": it.get("display_name", place), "source": "nominatim"}
+    except Exception:
+        app.logger.exception("[geocode] nominatim parse error")
+    return None
+
+# --- Provider: Open-Meteo
+def geocode_openmeteo(place: str) -> Optional[Dict[str, Any]]:
+    url = "https://geocoding-api.open-meteo.com/v1/search"
+    params = {"name": place, "count": 1, "language": "en", "format": "json"}
+    r = _req_with_retry(url, params=params, headers={"User-Agent": GEOCODER_UA})
+    if not r: return None
+    try:
+        data = r.json(); res = data.get("results") or []
+        if res:
+            it = res[0]
+            return {"lat": float(it["latitude"]), "lon": float(it["longitude"]),
+                    "name": f'{it.get("name","")}, {it.get("country_code","")}'.strip(", "),
+                    "source": "open-meteo"}
+    except Exception:
+        app.logger.exception("[geocode] open-meteo parse error")
+    return None
+
+# --- Provider: Maps.co (ulteriore fallback)
+def geocode_mapsco(place: str) -> Optional[Dict[str, Any]]:
+    url = "https://geocode.maps.co/search"
+    params = {"q": place}
+    r = _req_with_retry(url, params=params, headers={"User-Agent": GEOCODER_UA})
+    if not r: return None
+    try:
+        data = r.json()
+        if isinstance(data, list) and data:
+            it = data[0]
+            return {"lat": float(it["lat"]), "lon": float(it["lon"]),
+                    "name": it.get("display_name", place), "source": "maps.co"}
+    except Exception:
+        app.logger.exception("[geocode] maps.co parse error")
+    return None
+
+def geocode_place(place: str) -> Optional[Dict[str, Any]]:
+    key = f"geo:{_norm_place(place)}"
+    cached = GEO_CACHE.get(key)
+    if cached: return cached
+
+    providers = [geocode_google, geocode_nominatim, geocode_openmeteo, geocode_mapsco]
+    for fn in providers:
+        try:
+            res = fn(place)
+            if res and "lat" in res and "lon" in res:
+                GEO_CACHE.set(key, res)
+                return res
+        except Exception:
+            app.logger.exception(f"[geocode] provider crash: {fn.__name__}")
+            continue
+    return None
 
 app = Flask(__name__)
 DEBUG = os.getenv("FLASK_DEBUG", "1") == "1"
@@ -118,12 +260,12 @@ def natal():
     if not date_str or not place:
         return jsonify({"error": "Missing required fields: 'date' and 'place'"}), 400
 
-    # Geocode
-    geolocator = Nominatim(user_agent=os.getenv("GEOCODER_UA", "house-of-venus-astrocalc/1.0"), timeout=15)
-    location = geolocator.geocode(place, language="en")
-    if not location:
-        return jsonify({"error": f"Place not found: {place}"}), 404
-    lat, lon = float(location.latitude), float(location.longitude)
+    geo = geocode_place(place)
+    if not geo:
+        return jsonify({"error": f"Geocoding failed for '{place}' (providers exhausted). "
+                                 f"Try 'City, Country'"}), 502
+    lat, lon = float(geo["lat"]), float(geo["lon"])
+    resolved_place = geo.get("name", place)
 
     # Time zone
     tf = TimezoneFinder()
