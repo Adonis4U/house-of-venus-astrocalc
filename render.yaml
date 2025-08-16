@@ -28,10 +28,12 @@ services:
         value: 1luz3NgX1ECrXHh_xw07AHucIyONJ8vGN
       - key: API_KEY              # usata dal plugin WP
         value: your-secret-api-key
-      - key: CONTACT_EMAIL        # per User-Agent Nominatim
-        value: admin@houseofvenus.pl
-      - key: UA_SITE
-        value: https://houseofvenus.pl
+      - key: CONTACT_EMAIL        # per User-Agent - Per Nominatim (etichetta UA educata)
+        value: admin@houseofvenus.pl # per User-Agent - Per Nominatim (etichetta UA educata)
+      - key: UA_SITE # per User-Agent - Per Nominatim (etichetta UA educata)
+        value: https://houseofvenus.pl # per User-Agent - Per Nominatim (etichetta UA educata)
+      - key: GEOCODER_ORDER # per sciegliere la sequenza che uno vuole dei GEOCODER
+        value: nominatim,openmeteo,mapsco,google
       # opzionale se vuoi usare Google Geocoding come 1° provider
       # - key: GOOGLE_MAPS_API_KEY
       #   value: your-google-key

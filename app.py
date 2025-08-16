@@ -1,4 +1,5 @@
 import os
+from http_utils import http_get, http_post
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from threading import BoundedSemaphore
@@ -6,15 +7,45 @@ from threading import BoundedSemaphore
 from timezonefinder import TimezoneFinder
 import pytz
 import swisseph as swe
-import time, random, json, requests
+import sys, time, random, json, requests
 from typing import Optional, Dict, Any, Tuple
 # --- TimezoneFinder cache ---
 from cachetools import TTLCache
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from http_utils import http_get
+# from requests.adapters import HTTPAdapter # <- non usato qui
+# from urllib3.util.retry import Retry # <- non usato qui
 # --- Timezone utilities (in alto, vicino ad altri global) ---
 from pytz import AmbiguousTimeError, NonExistentTimeError
+# --- Per test, contatori e contatore di utilizzo api (Incluso Google)
+from collections import Counter
+from datetime import date
+
+start_ts = time.time()
+
+# Concorrenza massima dichiarata (deve matchare il tuo BoundedSemaphore)
+MAX_CONC = 6   # o il valore che hai usato in NATAL_SEM = BoundedSemaphore(6)
+
+STATS = {
+    "total":      {"natal_calls": 0, "google_calls": 0, "cache_hits": 0},
+    "daily":      {"natal_calls": 0, "google_calls": 0, "cache_hits": 0},
+    "last_reset": str(date.today()),  # YYYY-MM-DD del giorno corrente
+}
+
+def _ensure_stats_day():
+    """Reset giornaliero se è cambiata la data."""
+    today = str(date.today())
+    if STATS["last_reset"] != today:
+        STATS["daily"] = {"natal_calls": 0, "google_calls": 0, "cache_hits": 0}
+        STATS["last_reset"] = today
+
+def _bump(field: str, n: int = 1):
+    """Incrementa un campo su total e daily, con reset day-safe."""
+    _ensure_stats_day()
+    STATS["total"][field] += n
+    STATS["daily"][field] += n
+
+# Telemetria geocoding (per /google-usage)
+GEOCODE_PROVIDER_COUNTS = Counter()
+LAST_GEOCODE_HIT = {"source": None, "name": None, "lat": None, "lon": None}
 
 TF = TimezoneFinder()
 TZ_CACHE = TTLCache(maxsize=5000, ttl=30*24*3600)  # cache 30 giorni
@@ -123,6 +154,47 @@ def geocode_mapsco(place: str) -> Optional[Dict[str, Any]]:
         }
     return None
 
+# --- Geocoder order via ENV, con validazione e fallback ---
+def get_geocoder_order():
+    """
+    Costruisce la lista di provider nell'ordine richiesto.
+    Usa GEOCODER_ORDER, es. "nominatim,openmeteo,mapsco,google".
+    Valori non riconosciuti vengono ignorati con warning.
+    Google viene escluso se manca la GOOGLE_MAPS_API_KEY.
+    """
+    raw = os.getenv("GEOCODER_ORDER", "google,nominatim,openmeteo,mapsco")
+    requested = [s.strip().lower() for s in raw.split(",") if s.strip()]
+
+    allowed = {
+        "google": geocode_google if GOOGLE_MAPS_API_KEY else None,
+        "nominatim": geocode_nominatim,
+        "openmeteo": geocode_openmeteo,
+        "mapsco": geocode_mapsco,
+    }
+
+    providers = []
+    seen = set()
+    for name in requested:
+        if name not in allowed:
+            app.logger.warning(f"[geocode] provider sconosciuto in GEOCODER_ORDER: '{name}' (ignorato)")
+            continue
+        fn = allowed[name]
+        if fn and name not in seen:
+            providers.append(fn)
+            seen.add(name)
+
+    # se dopo il filtraggio non resta nulla, usa l'ordine di default valido
+    if not providers:
+        default_order = ["google", "nominatim", "openmeteo", "mapsco"]
+        providers = [allowed[n] for n in default_order if allowed[n]]
+
+    try:
+        app.logger.info(f"[geocode] ordine effettivo: {[fn.__name__ for fn in providers]}")
+    except Exception:
+        pass
+
+    return providers
+
 # --- Master geocode con cache+fallback ---
 def geocode_place(place: str) -> Optional[Dict[str, Any]]:
     if not place or not place.strip():
@@ -133,17 +205,31 @@ def geocode_place(place: str) -> Optional[Dict[str, Any]]:
     cached = GEOCODE_CACHE.get(key)
     if cached:
         return cached
-
-    providers = [geocode_google, geocode_nominatim, geocode_openmeteo, geocode_mapsco]
+    
+    # invece della lista fissa
+    # OLD Version: providers = [geocode_google, geocode_nominatim, geocode_openmeteo, geocode_mapsco]
+    providers = get_geocoder_order()
     for prov in providers:
         try:
             res = prov(place)
             if res and "lat" in res and "lon" in res:
                 GEOCODE_CACHE[key] = res
+                # 👇👇 AGGIUNGI QUI
+                GEOCODE_PROVIDER_COUNTS[res.get("source","unknown")] += 1
+                LAST_GEOCODE_HIT.update({
+                    "source": res.get("source"),
+                    "name": res.get("name"),
+                    "lat": float(res.get("lat")) if res.get("lat") is not None else None,
+                    "lon": float(res.get("lon")) if res.get("lon") is not None else None,
+                })
+                # 👆👆
+                # 👇 aggiungi qui
+                if res.get("source") == "google":
+                    _bump("google_calls")
+                # 👆
                 return res
         except Exception as e:
             app.logger.warning(f"geocode provider {prov.__name__} error: {e}")
-
     return None
 
 # def geocode_place(place: str):
@@ -412,6 +498,65 @@ PLANETS = [
 ]
 
 # ---- Public endpoints ----
+@app.get("/astro-stats")
+def astro_stats():
+    # reset giornaliero se è cambiata la data
+    _ensure_stats_day()
+
+    # attenzione: _value è attributo interno, ma utile per un’indicazione live
+    current_available = getattr(NATAL_SEM, "_value", None)
+
+    return {
+        "service": "houseofvenus-astrocalc",
+        "uptime_sec": round(time.time() - start_ts, 1),
+        "python": sys.version.split()[0],
+        # 👇 NUOVO: mostra l’ordine effettivo dei geocoder
+        "geocoder_order": [fn.__name__ for fn in get_geocoder_order()],
+        # === NUOVO: contatori compatibili con il tuo script ===
+        "last_reset": STATS["last_reset"],
+        "daily": {
+            "natal_calls": STATS["daily"]["natal_calls"],
+            "google_calls": STATS["daily"]["google_calls"],
+            "cache_hits":  STATS["daily"]["cache_hits"],
+        },
+        "total": {
+            "natal_calls": STATS["total"]["natal_calls"],
+            "google_calls": STATS["total"]["google_calls"],
+            "cache_hits":  STATS["total"]["cache_hits"],
+        },
+        # === FINE NUOVO ===
+
+        "cache": {
+            "natal_entries":   len(NATAL_CACHE),
+            "geocode_entries": len(GEOCODE_CACHE),
+            "tz_entries":      len(TZ_CACHE),
+        },
+        "concurrency": {
+            "max_parallel": MAX_CONC,
+            "available_token_estimate": current_available,
+        },
+        "health": "ok",
+    }, 200
+
+@app.get("/google-usage")
+def google_usage():
+    # Mantieni il reset giornaliero
+    _ensure_stats_day()
+    # se non imposti la key, segnala "disabled"
+    google_key_set = bool(os.getenv("GOOGLE_MAPS_API_KEY"))
+    return {
+        # ⬇️ campi che avevi già
+        "google_maps_api_key": "enabled" if google_key_set else "disabled",
+        # 👇 NUOVO: mostra l’ordine effettivo dei geocoder
+        "geocoder_order": [fn.__name__ for fn in get_geocoder_order()],
+        "geocode_provider_counts": dict(GEOCODE_PROVIDER_COUNTS),
+        "last_geocode_hit": LAST_GEOCODE_HIT,
+
+        # ⬇️ campi aggiunti per compatibilità con lo script PS
+        "calls_today": STATS["daily"]["google_calls"],
+        "last_reset": STATS["last_reset"],
+    }, 200
+
 @app.get("/")
 def index():
     # 200 OK per health-check; HEAD è gestito automaticamente da Flask
@@ -569,11 +714,13 @@ def natal():
     missing = [f for f in required if not data.get(f)]
     if missing:
         return {"error": f"missing fields: {', '.join(missing)}"}, 400
-
-    # --- chiave cache ---
+    _bump("natal_calls")
+    # 👇 AGGIUNGI QUESTA RIGA
     cache_key = _key_from_payload(data)
+    # --- chiave cache ---
     cached = NATAL_CACHE.get(cache_key)
     if cached is not None:
+        _bump("cache_hits")
         return cached, 200
 
     # --- controllo concorrenza per non saturare i thread ---
