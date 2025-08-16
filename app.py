@@ -7,6 +7,62 @@ import pytz
 import swisseph as swe
 import time, random, json, requests
 from typing import Optional, Dict, Any, Tuple
+from collections import defaultdict
+from datetime import date
+
+app = Flask(__name__)
+DEBUG = os.getenv("FLASK_DEBUG", "1") == "1"
+
+STATS_FILE = os.path.join(os.path.dirname(__file__), "stats.json")
+
+def load_stats():
+    if os.path.exists(STATS_FILE):
+        try:
+            with open(STATS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            app.logger.exception("[stats] errore lettura stats.json, resetto")
+    return {
+        "daily": {
+            "natal_calls": 0,
+            "cache_hits": 0,
+            "google_calls": 0,
+            "last_reset": str(date.today())
+        },
+        "total": {
+            "natal_calls": 0,
+            "cache_hits": 0,
+            "google_calls": 0
+        }
+    }
+
+def save_stats():
+    try:
+        with open(STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump(STATS, f)
+    except Exception:
+        app.logger.exception("[stats] errore scrittura stats.json")
+
+STATS = load_stats()
+
+# se vuoi aggiungere la chiave "last_reset" solo se non esiste
+if "last_reset" not in STATS:
+    STATS["last_reset"] = str(date.today())
+
+# se manca daily o total le inizializzo
+if "daily" not in STATS:
+    STATS["daily"] = {
+        "natal_calls": 0,
+        "cache_hits": 0,
+        "google_calls": 0,
+        "last_reset": str(date.today())
+    }
+if "total" not in STATS:
+    STATS["total"] = {
+        "natal_calls": 0,
+        "cache_hits": 0,
+        "google_calls": 0
+    }
 
 # --- CONFIG GEOCODING ---
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
@@ -88,6 +144,12 @@ def geocode_google(place: str) -> Optional[Dict[str, Any]]:
         if data.get("status") == "OK" and data.get("results"):
             it = data["results"][0]
             loc = it["geometry"]["location"]
+            # --- Incrementa contatore Google ---
+            # --- STATS["google_calls"] += 1  # --- STATS: conteggio uso Google ---
+            STATS["daily"]["google_calls"] += 1 # --- STATS: conteggio al giorno uso Google ---
+            STATS["total"]["google_calls"] += 1 # --- STATS: conteggio totale uso Google ---
+            save_stats()
+            app.logger.info(f"[stats] google_calls daily={STATS['daily']['google_calls']} total={STATS['total']['google_calls']}")
             return {"lat": float(loc["lat"]), "lon": float(loc["lng"]),
                     "name": it.get("formatted_address", place), "source": "google"}
     except Exception:
@@ -191,21 +253,34 @@ def geocode_place(place: str) -> Optional[Dict[str, Any]]:
             continue
     return None
 
-app = Flask(__name__)
-DEBUG = os.getenv("FLASK_DEBUG", "1") == "1"
+# ---- Endpoint di debug: uso di Google Geocoding ----
+@app.get("/google-usage")
+def google_usage():
+    return {
+        "calls_today": GOOGLE_CALLS_TODAY,
+        "last_reset": GOOGLE_LAST_RESET
+    }, 200    
+
+@app.get("/stats")
+def stats():
+    # reset giornaliero
+    today = str(date.today())
+    if STATS["daily"]["last_reset"] != today:
+        STATS["daily"].update({
+            "natal_calls": 0,
+            "cache_hits": 0,
+            "google_calls": 0,
+            "last_reset": today
+        })
+        save_stats()
+    return STATS, 200
 
 # ---- API key protection ----
 API_KEY = os.getenv("API_KEY", "a96be9cd-d006-439c-962b-3f8314d2e080")
 
+
 @app.before_request
 def check_api_key():
-    # Endpoint pubblici e preflight CORS
-    public_paths = ("/", "/health", "/healthz")
-    if request.method == "OPTIONS" or request.path in public_paths:
-        return
-    key = request.headers.get("X-API-Key")
-    if key != API_KEY:
-        return jsonify({"error": "Invalid or missing API key"}), 403
     # Endpoint pubblici e preflight CORS
     public_paths = ("/", "/health", "/healthz")
     if request.method == "OPTIONS" or request.path in public_paths:
@@ -310,13 +385,25 @@ def natal():
     if not date_str or not place:
         return jsonify({"error": "Missing required fields: 'date' and 'place'"}), 400
 
+    # --- STATS: chiamata valida a /natal ---
+    STATS["daily"]["natal_calls"] += 1
+    STATS["total"]["natal_calls"] += 1
+    save_stats()
+
     # --- Check cache risposta ---
     cache_key = make_natal_cache_key(data)
     cached_resp = ROUTE_CACHE.get(cache_key)
     if cached_resp:
         cached_resp["cached"] = True
-        app.logger.info(f"[natal] cache hit for {cache_key}")
+        STATS["daily"]["cache_hits"] += 1
+        STATS["total"]["cache_hits"] += 1
+        save_stats()
+        app.logger.info(f"[stats] cache hit daily={STATS['daily']['cache_hits']} total={STATS['total']['cache_hits']}")
         return jsonify(cached_resp)
+
+    # se non era in cache, è una nuova chiamata
+    # STATS["natal_calls"] += 1
+    # app.logger.info(f"[stats] natal_calls={STATS['natal_calls']}")
 
     geo = geocode_place(place)
     if not geo:
