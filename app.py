@@ -261,7 +261,7 @@ def google_usage():
         "last_reset": GOOGLE_LAST_RESET
     }, 200    
 
-# ---- Endpoint statistiche (rinominato per evitare 403 su Render) ----
+# ---- Endpoint statistiche (giornaliere + cumulative - rinominato per evitare 403 su Render) ----
 @app.get("/astro-stats")
 def astro_stats():
     # reset giornaliero
@@ -274,7 +274,23 @@ def astro_stats():
             "last_reset": today
         })
         save_stats()
-    return STATS, 200
+    return jsonify(STATS), 200
+
+# --- Esempio di utilizzo nelle tue funzioni ---
+# quando usi natal calc:
+# STATS["daily"]["natal_calls"] += 1
+# STATS["total"]["natal_calls"] += 1
+# save_stats()
+#
+# quando usi cache:
+# STATS["daily"]["cache_hits"] += 1
+# STATS["total"]["cache_hits"] += 1
+# save_stats()
+#
+# quando usi Google:
+# STATS["daily"]["google_calls"] += 1
+# STATS["total"]["google_calls"] += 1
+# save_stats()
 
 # ---- API key protection ----
 API_KEY = os.getenv("API_KEY", "a96be9cd-d006-439c-962b-3f8314d2e080")
@@ -355,11 +371,11 @@ def index():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}, 200
+    return jsonify({"status": "ok"}), 200
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok"}, 200
+    return jsonify({"status": "ok"}), 200
 
 # ---- Main API ----
 @app.post("/natal")
@@ -507,4 +523,5 @@ def natal():
     return jsonify(resp_payload)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=DEBUG)
+    port = int(os.environ.get("PORT", 8000))  # 8000 in locale, PORT su Render
+    app.run(host="0.0.0.0", port=port, debug=True)
