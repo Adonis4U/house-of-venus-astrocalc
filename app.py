@@ -19,6 +19,15 @@ from pytz import AmbiguousTimeError, NonExistentTimeError
 from collections import Counter
 from datetime import date
 
+# Endpoint pubblici (accessibili senza API key)
+PUBLIC_PATHS = {
+    "/",            # home
+    "/health",      # health (se esiste)
+    "/healthz",     # healthz
+    "/astro-stats", # stats generali
+    "/google-usage" # stats geocoding/Google
+}
+
 start_ts = time.time()
 
 # Concorrenza massima dichiarata (deve matchare il tuo BoundedSemaphore)
@@ -430,6 +439,31 @@ DEBUG = os.getenv("FLASK_DEBUG", "0") == "1"
 
 # API key: se non la imposti in ENV, l’API resta aperta (comodo per test)
 API_KEY = os.getenv("API_KEY", "")
+
+# API key Fcoltativa: Solo per PUBLIC PATH --> ATTIVO
+@app.before_request
+def _require_api_key():
+    """Protegge tutti gli endpoint tranne quelli in PUBLIC_PATHS.
+       Accetta la chiave sia via header X-API-Key sia via query ?api_key=."""
+    need_key = os.getenv("API_KEY")
+    if not need_key:
+        return None  # nessuna protezione se la var non è impostata
+
+    # normalizza il path (niente slash finali, tranne "/")
+    p = request.path
+    if p != "/" and p.endswith("/"):
+        p = p[:-1]
+
+    # se è pubblico, passa
+    if p in PUBLIC_PATHS:
+        return None
+
+    # controlla chiave da header o query string
+    provided = request.headers.get("X-API-Key") or request.args.get("api_key")
+    if provided == need_key:
+        return None
+
+    return jsonify(error="Invalid or missing API key"), 401
 
 # ---- Protezione API key (solo se impostata) ----
 @app.before_request
