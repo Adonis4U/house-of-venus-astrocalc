@@ -3,15 +3,37 @@ services:
     name: houseofvenus-astrocalc
     env: python
     plan: free
+
     buildCommand: |
       pip install -r requirements.txt
       bash ./install_ephe.sh
-    startCommand: gunicorn app:app -w 2 -k gthread --threads 8 --timeout 120 --keep-alive 15 --preload --bind 0.0.0.0:$PORT
+
+    startCommand: >
+      gunicorn app:app
+      -w 1
+      -k gthread --threads 8
+      --timeout 120 --graceful-timeout 30
+      --keep-alive 15
+      --max-requests 1000 --max-requests-jitter 100
+      --worker-tmp-dir /dev/shm
+      --bind 0.0.0.0:$PORT
+
     healthCheckPath: /healthz
+    autoDeploy: true
+
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.13
       - key: EPHE_FILE_ID
         value: 1luz3NgX1ECrXHh_xw07AHucIyONJ8vGN
+      - key: API_KEY              # usata dal plugin WP
+        value: your-secret-api-key
+      - key: CONTACT_EMAIL        # per User-Agent Nominatim
+        value: admin@houseofvenus.pl
+      - key: UA_SITE
+        value: https://houseofvenus.pl
+      # opzionale se vuoi usare Google Geocoding come 1° provider
+      # - key: GOOGLE_MAPS_API_KEY
+      #   value: your-google-key
 
 
