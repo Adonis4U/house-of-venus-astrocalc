@@ -261,8 +261,9 @@ def google_usage():
         "last_reset": GOOGLE_LAST_RESET
     }, 200    
 
-@app.get("/stats")
-def stats():
+# ---- Endpoint statistiche (rinominato per evitare 403 su Render) ----
+@app.get("/astro-stats")
+def astro_stats():
     # reset giornaliero
     today = str(date.today())
     if STATS["daily"]["last_reset"] != today:
