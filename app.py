@@ -466,17 +466,18 @@ def _require_api_key():
     return jsonify(error="Invalid or missing API key"), 401
 
 # ---- Protezione API key (solo se impostata) ----
-@app.before_request
-def check_api_key():
-    # endpoint pubblici e preflight
-    public_paths = ("/", "/health", "/healthz")
-    if request.method == "OPTIONS" or request.path in public_paths:
-        return
-    # se API_KEY è settata, richiedi header X-API-Key
-    if API_KEY:
-        key = request.headers.get("X-API-Key")
-        if key != API_KEY:
-            return jsonify({"error": "Invalid or missing API key"}), 403
+
+# @app.before_request
+# def check_api_key():
+#    # endpoint pubblici e preflight
+#    public_paths = ("/", "/health", "/healthz")
+#    if request.method == "OPTIONS" or request.path in public_paths:
+#        return
+#    # se API_KEY è settata, richiedi header X-API-Key
+#    if API_KEY:
+#        key = request.headers.get("X-API-Key")
+#        if key != API_KEY:
+#            return jsonify({"error": "Invalid or missing API key"}), 403
 
 # ---- CORS (open while testing; restrict in production) ----
 @app.after_request
