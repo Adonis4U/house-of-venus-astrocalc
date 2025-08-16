@@ -39,6 +39,18 @@ class SimpleTTLCache:
         self.store[key] = (time.time(), val)
 
 GEO_CACHE = SimpleTTLCache(ttl=GEO_TTL_SECONDS)
+ROUTE_TTL_SECONDS = int(os.getenv("ROUTE_TTL_SECONDS", "300"))  # default 5 min
+ROUTE_CACHE = SimpleTTLCache(maxsize=2000, ttl=ROUTE_TTL_SECONDS)
+
+def make_natal_cache_key(data: dict) -> str:
+    fields = {
+        "name": (data.get("name") or "").strip().lower(),
+        "date": data.get("date"),
+        "time": data.get("time"),
+        "place": (data.get("place") or "").strip().lower(),
+        "house_system": (data.get("house_system") or "").strip().upper(),
+    }
+    return "natal:" + json.dumps(fields, sort_keys=True)
 
 def _norm_place(s: str) -> str:
     return " ".join((s or "").strip().split()).lower()
@@ -120,27 +132,58 @@ def geocode_mapsco(place: str) -> Optional[Dict[str, Any]]:
     url = "https://geocode.maps.co/search"
     params = {"q": place}
     r = _req_with_retry(url, params=params, headers={"User-Agent": GEOCODER_UA})
-    if not r: return None
+    if not r:
+        return None
     try:
         data = r.json()
         if isinstance(data, list) and data:
             it = data[0]
-            return {"lat": float(it["lat"]), "lon": float(it["lon"]),
-                    "name": it.get("display_name", place), "source": "maps.co"}
+            return {
+                "lat": float(it["lat"]),
+                "lon": float(it["lon"]),
+                "name": it.get("display_name", place),
+                "source": "maps.co"
+            }
     except Exception:
         app.logger.exception("[geocode] maps.co parse error")
     return None
 
+# --- Contatore chiamate Google ---
+GOOGLE_CALLS_TODAY = 0
+GOOGLE_LAST_RESET = time.strftime("%Y-%m-%d")
+
 def geocode_place(place: str) -> Optional[Dict[str, Any]]:
+    global GOOGLE_CALLS_TODAY, GOOGLE_LAST_RESET
+
+    # Reset contatore se è cambiato il giorno
+    today = time.strftime("%Y-%m-%d")
+    if today != GOOGLE_LAST_RESET:
+        GOOGLE_CALLS_TODAY = 0
+        GOOGLE_LAST_RESET = today
+
     key = f"geo:{_norm_place(place)}"
     cached = GEO_CACHE.get(key)
-    if cached: return cached
+    if cached:
+        return cached
 
-    providers = [geocode_google, geocode_nominatim, geocode_openmeteo, geocode_mapsco]
+    # Ordine provider: gratis prima, Google per ultimo
+    providers = [
+        geocode_nominatim,
+        geocode_openmeteo,
+        geocode_mapsco,
+        geocode_google  # <-- Google solo se gli altri falliscono
+    ]
+
     for fn in providers:
         try:
             res = fn(place)
             if res and "lat" in res and "lon" in res:
+                # Se è Google, incrementa il contatore e logga
+                if res.get("source") == "google":
+                    GOOGLE_CALLS_TODAY += 1
+                    app.logger.warning(
+                        f"[geocode] Chiamata Google #{GOOGLE_CALLS_TODAY} oggi per '{place}'"
+                    )
                 GEO_CACHE.set(key, res)
                 return res
         except Exception:
@@ -156,6 +199,13 @@ API_KEY = os.getenv("API_KEY", "a96be9cd-d006-439c-962b-3f8314d2e080")
 
 @app.before_request
 def check_api_key():
+    # Endpoint pubblici e preflight CORS
+    public_paths = ("/", "/health", "/healthz")
+    if request.method == "OPTIONS" or request.path in public_paths:
+        return
+    key = request.headers.get("X-API-Key")
+    if key != API_KEY:
+        return jsonify({"error": "Invalid or missing API key"}), 403
     # Endpoint pubblici e preflight CORS
     public_paths = ("/", "/health", "/healthz")
     if request.method == "OPTIONS" or request.path in public_paths:
@@ -260,6 +310,14 @@ def natal():
     if not date_str or not place:
         return jsonify({"error": "Missing required fields: 'date' and 'place'"}), 400
 
+    # --- Check cache risposta ---
+    cache_key = make_natal_cache_key(data)
+    cached_resp = ROUTE_CACHE.get(cache_key)
+    if cached_resp:
+        cached_resp["cached"] = True
+        app.logger.info(f"[natal] cache hit for {cache_key}")
+        return jsonify(cached_resp)
+
     geo = geocode_place(place)
     if not geo:
         return jsonify({"error": f"Geocoding failed for '{place}' (providers exhausted). "
@@ -316,12 +374,14 @@ def natal():
     except Exception as e:
         return jsonify({"error": f"Houses calculation failed: {e}"}), 500
 
-    houses = {str(i+1): round(float(cusps[i]), 6) for i in range(12)}
-    asc = float(ascmc[0]); mc = float(ascmc[1])
+    houses = {str(i + 1): round(float(cusps[i]), 6) for i in range(12)}
+    asc = float(ascmc[0])
+    mc = float(ascmc[1])
     asc_sign, asc_deg_in_sign, asc_abs = lon_to_sign_deg(asc)
     mc_sign, mc_deg_in_sign, mc_abs = lon_to_sign_deg(mc)
 
-    return jsonify({
+    # --- Costruisci payload risposta ---
+    resp_payload = {
         "input": {
             "name": name,
             "place_query": place,
@@ -349,9 +409,14 @@ def natal():
                 "deg_str": format_deg(mc_deg_in_sign)
             }
         },
-        "houses": houses
-    })
+        "houses": houses,
+        "cached": False
+    }
+
+    # --- Salva in cache ---
+    ROUTE_CACHE.set(cache_key, dict(resp_payload))  # dict() = copia per sicurezza
+
+    return jsonify(resp_payload)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=DEBUG)
-
